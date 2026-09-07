@@ -1,6 +1,6 @@
 import React from 'react';
 import { RecoilRoot } from 'recoil';
-import { renderHook } from '@testing-library/react';
+import { renderHook, waitFor } from '@testing-library/react';
 import { PermissionTypes, Permissions } from 'librechat-data-provider';
 import type { TUser } from 'librechat-data-provider';
 
@@ -9,12 +9,25 @@ type CloudFrontRetryOptions = { getAuthorizationHeader: () => string | undefined
 const mockUseHasAccess = jest.fn();
 const mockUseMCPServersQuery = jest.fn();
 const mockUseMCPToolsQuery = jest.fn();
+const mockUseMCPConnectionStatusQuery = jest.fn();
+const mockUseQueries = jest.fn();
+const mockInvalidateQueries = jest.fn();
+const mockReinitializeMCPServer = jest.fn();
 const mockInstallCloudFrontImageRetry = jest.fn(
   (_startupConfig: unknown, _options: CloudFrontRetryOptions): (() => void) =>
     () =>
       undefined,
 );
 const mockGetTokenHeader = jest.fn();
+
+jest.mock('@tanstack/react-query', () => {
+  const actual = jest.requireActual('@tanstack/react-query');
+  return {
+    ...actual,
+    useQueries: (config: unknown) => mockUseQueries(config),
+    useQueryClient: () => ({ invalidateQueries: mockInvalidateQueries }),
+  };
+});
 
 jest.mock('@librechat/client', () => ({
   installCloudFrontImageRetry: (startupConfig: unknown, options: CloudFrontRetryOptions) =>
@@ -25,6 +38,10 @@ jest.mock('librechat-data-provider', () => {
   const actual = jest.requireActual('librechat-data-provider');
   return {
     ...actual,
+    dataService: {
+      ...actual.dataService,
+      reinitializeMCPServer: (serverName: string) => mockReinitializeMCPServer(serverName),
+    },
     getTokenHeader: () => mockGetTokenHeader(),
   };
 });
@@ -34,6 +51,7 @@ jest.mock('~/hooks', () => ({
 }));
 
 jest.mock('~/data-provider', () => ({
+  useMCPConnectionStatusQuery: (config: unknown) => mockUseMCPConnectionStatusQuery(config),
   useMCPServersQuery: (config: unknown) => mockUseMCPServersQuery(config),
   useMCPToolsQuery: (config: unknown) => mockUseMCPToolsQuery(config),
 }));
@@ -73,9 +91,14 @@ const wrapper: React.FC<{ children: React.ReactNode }> = ({ children }) => (
 
 describe('useAppStartup — MCP permission gating', () => {
   beforeEach(() => {
+    jest.clearAllMocks();
     mockInstallCloudFrontImageRetry.mockClear();
     mockUseMCPServersQuery.mockReturnValue({ data: undefined, isLoading: false });
     mockUseMCPToolsQuery.mockReturnValue({ data: undefined, isLoading: false });
+    mockUseMCPConnectionStatusQuery.mockReturnValue({ data: undefined, isLoading: false });
+    mockUseQueries.mockReturnValue([]);
+    mockInvalidateQueries.mockResolvedValue(undefined);
+    mockReinitializeMCPServer.mockResolvedValue({ success: true });
   });
 
   it('checks the MCP_SERVERS.USE permission via useHasAccess', () => {
@@ -164,5 +187,126 @@ describe('useAppStartup — MCP permission gating', () => {
 
     expect(options.getAuthorizationHeader()).toBe('Bearer app-token');
     expect(mockGetTokenHeader).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconnects a disconnected startup server when all user credentials are set', async () => {
+    mockUseHasAccess.mockReturnValue(true);
+    mockUseMCPServersQuery.mockReturnValue({
+      data: {
+        quinn: {
+          startup: true,
+          requiresOAuth: false,
+          customUserVars: { QUINN_ACCESS_TOKEN: { title: 'Token', description: 'Token' } },
+        },
+      },
+      isLoading: false,
+    });
+    mockUseMCPConnectionStatusQuery.mockReturnValue({
+      data: {
+        success: true,
+        connectionStatus: {
+          quinn: { connectionState: 'disconnected', requiresOAuth: false },
+        },
+      },
+    });
+    mockUseQueries.mockReturnValue([
+      {
+        data: {
+          success: true,
+          serverName: 'quinn',
+          authValueFlags: { QUINN_ACCESS_TOKEN: true },
+        },
+      },
+    ]);
+
+    renderHook(() => useAppStartup({ startupConfig: undefined, user: mockUser }), { wrapper });
+
+    await waitFor(() => expect(mockReinitializeMCPServer).toHaveBeenCalledWith('quinn'));
+  });
+
+  it('does not reconnect when a required user credential is missing', () => {
+    mockUseHasAccess.mockReturnValue(true);
+    mockUseMCPServersQuery.mockReturnValue({
+      data: {
+        quinn: {
+          startup: true,
+          requiresOAuth: false,
+          customUserVars: { QUINN_ACCESS_TOKEN: { title: 'Token', description: 'Token' } },
+        },
+      },
+      isLoading: false,
+    });
+    mockUseMCPConnectionStatusQuery.mockReturnValue({
+      data: {
+        success: true,
+        connectionStatus: {
+          quinn: { connectionState: 'disconnected', requiresOAuth: false },
+        },
+      },
+    });
+    mockUseQueries.mockReturnValue([
+      {
+        data: {
+          success: true,
+          serverName: 'quinn',
+          authValueFlags: { QUINN_ACCESS_TOKEN: false },
+        },
+      },
+    ]);
+
+    renderHook(() => useAppStartup({ startupConfig: undefined, user: mockUser }), { wrapper });
+
+    expect(mockReinitializeMCPServer).not.toHaveBeenCalled();
+  });
+
+  it('does not reconnect an already connected server or repeat an attempted reconnect', async () => {
+    mockUseHasAccess.mockReturnValue(true);
+    const serverQuery = {
+      data: {
+        quinn: {
+          startup: true,
+          requiresOAuth: false,
+          customUserVars: { QUINN_ACCESS_TOKEN: { title: 'Token', description: 'Token' } },
+        },
+      },
+      isLoading: false,
+    };
+    mockUseMCPServersQuery.mockReturnValue(serverQuery);
+    mockUseQueries.mockReturnValue([
+      {
+        data: {
+          success: true,
+          serverName: 'quinn',
+          authValueFlags: { QUINN_ACCESS_TOKEN: true },
+        },
+      },
+    ]);
+    mockUseMCPConnectionStatusQuery.mockReturnValue({
+      data: {
+        success: true,
+        connectionStatus: {
+          quinn: { connectionState: 'connected', requiresOAuth: false },
+        },
+      },
+    });
+    const { rerender } = renderHook(
+      () => useAppStartup({ startupConfig: undefined, user: mockUser }),
+      { wrapper },
+    );
+
+    expect(mockReinitializeMCPServer).not.toHaveBeenCalled();
+
+    mockUseMCPConnectionStatusQuery.mockReturnValue({
+      data: {
+        success: true,
+        connectionStatus: {
+          quinn: { connectionState: 'disconnected', requiresOAuth: false },
+        },
+      },
+    });
+    rerender();
+    rerender();
+
+    await waitFor(() => expect(mockReinitializeMCPServer).toHaveBeenCalledTimes(1));
   });
 });

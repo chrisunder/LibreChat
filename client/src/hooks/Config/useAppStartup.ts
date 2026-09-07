@@ -1,15 +1,22 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { useRecoilState } from 'recoil';
+import { useQueries, useQueryClient } from '@tanstack/react-query';
 import TagManager from 'react-gtm-module';
 import { installCloudFrontImageRetry } from '@librechat/client';
 import {
+  dataService,
   getTokenHeader,
   LocalStorageKeys,
   PermissionTypes,
   Permissions,
+  QueryKeys,
 } from 'librechat-data-provider';
-import type { TStartupConfig, TUser } from 'librechat-data-provider';
-import { useMCPToolsQuery, useMCPServersQuery } from '~/data-provider';
+import type { MCPAuthValuesResponse, TStartupConfig, TUser } from 'librechat-data-provider';
+import {
+  useMCPConnectionStatusQuery,
+  useMCPToolsQuery,
+  useMCPServersQuery,
+} from '~/data-provider';
 import { cleanupTimestampedStorage } from '~/utils/timestamps';
 import useSpeechSettingsInit from './useSpeechSettingsInit';
 import { useHasAccess } from '~/hooks';
@@ -23,6 +30,9 @@ export default function useAppStartup({
   user?: TUser;
 }) {
   const [defaultPreset, setDefaultPreset] = useRecoilState(store.defaultPreset);
+  const queryClient = useQueryClient();
+  const reconnectAttempts = useRef(new Set<string>());
+  const reconnectUserId = useRef<string>();
   const canUseMcp = useHasAccess({
     permissionType: PermissionTypes.MCP_SERVERS,
     permission: Permissions.USE,
@@ -31,6 +41,27 @@ export default function useAppStartup({
   useSpeechSettingsInit(!!user);
   const { data: loadedServers, isLoading: serversLoading } = useMCPServersQuery({
     enabled: canUseMcp,
+  });
+  const reconnectServers = useMemo(
+    () =>
+      Object.entries(loadedServers ?? {}).filter(
+        ([, server]) =>
+          server.startup === true &&
+          server.requiresOAuth === false &&
+          Object.keys(server.customUserVars ?? {}).length > 0,
+      ),
+    [loadedServers],
+  );
+  const authValueQueries = useQueries({
+    queries: reconnectServers.map(([serverName]) => ({
+      queryKey: [QueryKeys.mcpAuthValues, serverName],
+      queryFn: () => dataService.getMCPAuthValues(serverName),
+      enabled: canUseMcp && !!user,
+      staleTime: Infinity,
+    })),
+  });
+  const { data: connectionStatus } = useMCPConnectionStatusQuery({
+    enabled: canUseMcp && !!user && reconnectServers.length > 0,
   });
 
   useMCPToolsQuery({
@@ -41,6 +72,56 @@ export default function useAppStartup({
       Object.keys(loadedServers).length > 0 &&
       !!user,
   });
+
+  useEffect(() => {
+    if (!canUseMcp || !user || !connectionStatus?.success) {
+      return;
+    }
+
+    if (reconnectUserId.current !== user.id) {
+      reconnectAttempts.current.clear();
+      reconnectUserId.current = user.id;
+    }
+
+    reconnectServers.forEach(([serverName, server], index) => {
+      const state = connectionStatus.connectionStatus[serverName]?.connectionState;
+      if (state !== 'disconnected' && state !== 'error') {
+        return;
+      }
+
+      const authValues = authValueQueries[index]?.data as MCPAuthValuesResponse | undefined;
+      const requiredVariables = Object.keys(server.customUserVars ?? {});
+      if (
+        !authValues?.success ||
+        !requiredVariables.every((variable) => authValues.authValueFlags[variable] === true)
+      ) {
+        return;
+      }
+
+      const attemptKey = `${user.id}:${serverName}`;
+      if (reconnectAttempts.current.has(attemptKey)) {
+        return;
+      }
+      reconnectAttempts.current.add(attemptKey);
+
+      void dataService
+        .reinitializeMCPServer(serverName)
+        .then(() =>
+          Promise.all([
+            queryClient.invalidateQueries([QueryKeys.mcpTools]),
+            queryClient.invalidateQueries([QueryKeys.mcpConnectionStatus]),
+          ]),
+        )
+        .catch(() => undefined);
+    });
+  }, [
+    authValueQueries,
+    canUseMcp,
+    connectionStatus,
+    queryClient,
+    reconnectServers,
+    user,
+  ]);
 
   /** Clean up old localStorage entries on startup */
   useEffect(() => {
