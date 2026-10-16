@@ -206,6 +206,12 @@ function SkillsCommandContent({
       }
 
       setEphemeralAgent((prev) => {
+        if (
+          mention.value === 'screen-time-policy-and-apply' &&
+          (!agentId || isEphemeralAgent(agentId))
+        ) {
+          return { ...(prev || {}), skills: true, mcp: ['quinn-research', 'macos-policy-apply'] };
+        }
         if (prev?.skills) {
           return prev;
         }
@@ -232,6 +238,7 @@ function SkillsCommandContent({
       textAreaRef,
       setEphemeralAgent,
       setPendingManualSkills,
+      agentId,
     ],
   );
 
