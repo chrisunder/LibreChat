@@ -25,7 +25,7 @@ import type {
   EndpointSchemaKey,
 } from 'librechat-data-provider';
 import type { SetterOrUpdater } from 'recoil';
-import type { TAskFunction, ExtendedFile } from '~/common';
+import { isEphemeralAgent, type TAskFunction, type ExtendedFile } from '~/common';
 import {
   logger,
   hasStreamStartFailed,
@@ -35,10 +35,16 @@ import {
 import useFocusRegeneratedResponse from '~/hooks/Chat/useFocusRegeneratedResponse';
 import useSetFilesToDelete from '~/hooks/Files/useSetFilesToDelete';
 import useGetSender from '~/hooks/Conversations/useGetSender';
-import store, { useGetEphemeralAgent } from '~/store';
+import store, { useGetEphemeralAgent, useUpdateEphemeralAgent } from '~/store';
 import { startupConfigKey } from '~/data-provider';
 import useUserKey from '~/hooks/Input/useUserKey';
 import { useAuthContext } from '~/hooks';
+
+export function isScreenTimeEntry(text: string, conversation: TConversation | null): boolean {
+  return conversation?.spec === 'quinn-local' &&
+    (!conversation.agent_id || isEphemeralAgent(conversation.agent_id)) &&
+    /^screen\s+time\s+(?:research\s+and\s+update|validate|allow)(?:\s|[.!?]|$)/i.test(text.trim());
+}
 
 const logChatRequest = (request: Record<string, unknown>) => {
   logger.log('=====================================\nAsk function called with:');
@@ -209,6 +215,7 @@ export default function useChatFunctions({
   const queryClient = useQueryClient();
   const setFilesToDelete = useSetFilesToDelete();
   const getEphemeralAgent = useGetEphemeralAgent();
+  const updateEphemeralAgent = useUpdateEphemeralAgent();
   const isTemporary = useRecoilValue(store.isTemporary);
   const { getExpiry } = useUserKey(immutableConversation?.endpoint ?? '');
   const setIsSubmitting = useSetRecoilState(store.isSubmittingFamily(index));
@@ -315,7 +322,7 @@ export default function useChatFunctions({
       return false;
     }
 
-    const ephemeralAgent = getEphemeralAgent(conversationId ?? Constants.NEW_CONVO);
+    let ephemeralAgent = getEphemeralAgent(conversationId ?? Constants.NEW_CONVO);
     /**
      * Manual skill selection resolution:
      *  - Explicit `overrideManualSkills` wins (regenerate / save-and-submit
@@ -333,6 +340,17 @@ export default function useChatFunctions({
         isRegenerate || isContinued || isEdited
           ? []
           : drainPendingManualSkills(conversationId ?? Constants.NEW_CONVO);
+    }
+    if (
+      !isRegenerate && !isContinued && !isEdited && overrideManualSkills == null &&
+      isScreenTimeEntry(text, conversation)
+    ) {
+      ephemeralAgent = {
+        ...ephemeralAgent,
+        skills: true, mcp: ['quinn-research', 'macos-policy-apply'],
+      };
+      updateEphemeralAgent(conversationId ?? Constants.NEW_CONVO, ephemeralAgent);
+      manualSkills = [...new Set([...manualSkills, 'screen-time-policy-and-apply'])];
     }
     /**
      * Quoted-excerpt resolution mirrors manual skills, but is skipped entirely
