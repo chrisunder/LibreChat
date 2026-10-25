@@ -43,7 +43,7 @@ import { useAuthContext } from '~/hooks';
 export function isScreenTimeEntry(text: string, conversation: TConversation | null): boolean {
   return conversation?.spec === 'quinn-local' &&
     (!conversation.agent_id || isEphemeralAgent(conversation.agent_id)) &&
-    (/^(?:please\s+)?(?:screen\s+time\s+research\s+and\s+update|research\s+(?:and\s+(?:then\s+)?|then\s+)update\s+screen\s+time)(?=\s|[.!?]|$)/i.test(text.trim()) ||
+    (/^(?:please\s+)?(?:screen\s+time\s+research\s+and\s+update|research\s+(?:and\s+(?:then\s+)?|then\s+)update\s+screen\s+time|research\s+and\s+(?:make|give|provide)\s+(?:website\s+)?recommendations\s+to\s+block)(?=\s|[.!?]|$)/i.test(text.trim()) ||
       /^screen\s+time\s+(?:validate|allow)(?:\s|[.!?]|$)/i.test(text.trim()));
 }
 
